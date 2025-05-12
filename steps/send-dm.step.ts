@@ -145,6 +145,7 @@ class InstagramAutomation {
   async init() {
     this.browser = await chromium.launch({
       headless: false,
+      args: ['--disable-blink-features=AutomationControlled']
     })
 
     this.context = await this.browser.newContext({
@@ -158,7 +159,11 @@ class InstagramAutomation {
     // Restore cookies if available
     const cookiesData = getInstagramCookies()
     if (cookiesData) {
-      await this.context.addCookies(cookiesData)
+      try {
+        await this.context.addCookies(cookiesData)
+      } catch (error) {
+        console.error('Error restoring cookies:', error)
+      }
     }
   }
 
@@ -167,42 +172,15 @@ class InstagramAutomation {
 
     try {
       logger.info('Navigating to Instagram login...')
-      await this.page.goto('https://www.instagram.com/accounts/login/', {
-        waitUntil: 'networkidle',
-        timeout: 60000,
-      })
-
-      const loginForm = await this.page.$('form[id="loginForm"]')
-      if (loginForm) {
-        logger.info('Logging in to Instagram...')
-        await this.page.fill(
-          'input[name="username"]',
-          process.env.INSTAGRAM_USERNAME!
-        )
-        await this.page.fill(
-          'input[name="password"]',
-          process.env.INSTAGRAM_PASSWORD!
-        )
-        await this.page.click('button[type="submit"]')
-
-        logger.info('Waiting for verification...')
-        await new Promise((resolve) => setTimeout(resolve, 60000))
-
-        // Save cookies after successful login
-        const cookies = await this.context.cookies()
-        saveInstagramCookies(cookies)
-      }
-
-      // Verify login
+      // Use domcontentloaded instead of networkidle for more reliable loading
       await this.page.goto('https://www.instagram.com/', {
-        waitUntil: 'networkidle',
+        waitUntil: 'domcontentloaded',
         timeout: 60000,
       })
 
-      // Wait longer for the page to stabilize
       await new Promise(resolve => setTimeout(resolve, 5000));
 
-      // Look for various elements that indicate we're logged in
+      // Check if we're already logged in by looking for common elements
       let isLoggedIn = false;
       const loginIndicators = [
         'svg[aria-label="Home"]',
@@ -214,7 +192,73 @@ class InstagramAutomation {
 
       for (const selector of loginIndicators) {
         try {
-          const element = await this.page.waitForSelector(selector, { timeout: 5000, visible: true }); // Added visible check and reduced individual timeout
+          const element = await this.page.$(selector);
+          if (element) {
+            isLoggedIn = true;
+            logger.info(`Already logged in (detected ${selector})`);
+            break;
+          }
+        } catch (e) {
+          // Continue checking other selectors
+        }
+      }
+
+      // If not logged in, go to login page and authenticate
+      if (!isLoggedIn) {
+        logger.info('Not logged in, navigating to login page...');
+
+        await this.page.goto('https://www.instagram.com/accounts/login/', {
+          waitUntil: 'domcontentloaded', // More reliable than networkidle
+          timeout: 60000,
+        });
+
+        // Wait for login form to appear
+        const loginFormSelector = 'form[id="loginForm"]';
+        try {
+          const loginForm = await this.page.waitForSelector(loginFormSelector, { timeout: 15000 });
+
+          if (loginForm) {
+            logger.info('Logging in to Instagram...');
+
+            // Fill credentials with a small delay between actions
+            await this.page.fill('input[name="username"]', process.env.INSTAGRAM_USERNAME!);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            await this.page.fill('input[name="password"]', process.env.INSTAGRAM_PASSWORD!);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            await this.page.click('button[type="submit"]');
+
+            logger.info('Waiting for verification...');
+            await new Promise((resolve) => setTimeout(resolve, 60000));
+
+            // Save cookies after successful login
+            const cookies = await this.context.cookies();
+            saveInstagramCookies(cookies);
+          }
+        } catch (e) {
+          logger.warn('Could not find login form, may already be logged in');
+        }
+      }
+
+      // Verify login by navigating to home page
+      logger.info('Verifying login status...');
+      await this.page.goto('https://www.instagram.com/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000,
+      });
+
+      // Wait longer for the page to stabilize
+      await new Promise(resolve => setTimeout(resolve, 5000));
+
+      // Check multiple indicators of login status
+      isLoggedIn = false;
+      for (const selector of loginIndicators) {
+        try {
+          const element = await this.page.waitForSelector(selector, {
+            timeout: 5000,
+            state: 'visible'
+          });
           if (element) {
             isLoggedIn = true;
             logger.info(`Login verified with selector: ${selector}`);
@@ -237,10 +281,10 @@ class InstagramAutomation {
         throw new Error('Login verification failed. Could not find any standard login indicators.');
       }
 
-      logger.info('Successfully logged in to Instagram')
+      logger.info('Successfully logged in to Instagram');
     } catch (error) {
-      logger.error('Login failed:', error)
-      throw error
+      logger.error('Login failed:', error);
+      throw error;
     }
   }
 
@@ -610,6 +654,13 @@ export const handler: StepHandler<typeof config> = async (
 ) => {
   logger.info('Starting DM campaign', { location: input.location })
 
+  // Create output directory if it doesn't exist
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true })
+  }
+
+  const instagram = new InstagramAutomation()
+
   try {
     // Check message limits
     const { hourly, daily } = getMessageCounts()
@@ -652,8 +703,12 @@ export const handler: StepHandler<typeof config> = async (
     try {
       allRestaurants = loadRestaurants()
     } catch (restaurantError) {
-      logger.error('Failed to load restaurants:', restaurantError)
-      throw new Error(`Failed to load restaurants: ${restaurantError.message || 'Unknown error'}`)
+      logger.error('Failed to load restaurants:',
+        typeof restaurantError === 'object'
+          ? JSON.stringify(restaurantError, Object.getOwnPropertyNames(restaurantError))
+          : String(restaurantError)
+      );
+      throw new Error(`Failed to load restaurants: ${restaurantError.message || 'Unknown error'}`);
     }
 
     const locationKey = input.location.toLowerCase()
@@ -691,20 +746,39 @@ export const handler: StepHandler<typeof config> = async (
     logger.info(`Found ${messagesToSend.length} restaurants to message (limited by hourly/daily caps)`)
 
     // Initialize browser and login
-    const instagram = new InstagramAutomation()
     try {
       await instagram.init()
       logger.info('Browser initialized successfully')
     } catch (browserError) {
-      logger.error('Browser initialization failed:', browserError)
-      throw new Error(`Browser initialization failed: ${browserError.message || 'Unknown error'}`)
+      logger.error('Browser initialization failed:',
+        typeof browserError === 'object'
+          ? JSON.stringify(browserError, Object.getOwnPropertyNames(browserError))
+          : String(browserError)
+      );
+      throw new Error(`Browser initialization failed: ${browserError.message || 'Unknown error'}`);
     }
 
     try {
       await instagram.login(logger)
       logger.info('Login completed successfully')
     } catch (loginError) {
-      logger.error('Login failed - detailed error:', loginError)
+      // First log error as string with explicit message and stack
+      if (loginError instanceof Error) {
+        logger.error(`Login failed - Error message: ${loginError.message}`);
+        if (loginError.stack) {
+          logger.error(`Login failed - Stack trace: ${loginError.stack}`);
+        }
+      } else {
+        logger.error(`Login failed - Raw error: ${String(loginError)}`);
+      }
+
+      // Then log full serialized error object
+      logger.error('Login failed - Complete error:',
+        typeof loginError === 'object'
+          ? JSON.stringify(loginError, Object.getOwnPropertyNames(loginError))
+          : String(loginError)
+      );
+
       // Take screenshot if possible
       try {
         if (instagram.page) {
@@ -750,21 +824,18 @@ export const handler: StepHandler<typeof config> = async (
           logger.info(`Failed to send message to ${restaurant.name}`)
         }
       } catch (messageError) {
-        logger.error(`Error sending message to ${restaurant.name}:`, messageError)
+        logger.error(`Error sending message to ${restaurant.name}:`,
+          typeof messageError === 'object'
+            ? JSON.stringify(messageError, Object.getOwnPropertyNames(messageError))
+            : String(messageError)
+        );
         // Continue with next restaurant
       }
 
-      // Wait between messages
-      await new Promise((resolve) =>
-        setTimeout(resolve, 20000 + Math.random() * 10000)
-      )
-    }
-
-    try {
-      await instagram.close()
-      logger.info('Browser closed successfully')
-    } catch (closeError) {
-      logger.error('Error closing browser:', closeError)
+      // Wait between messages (random delay between 20-30 seconds)
+      const waitTime = 20000 + Math.random() * 10000
+      logger.info(`Waiting ${Math.round(waitTime/1000)} seconds before next message...`)
+      await new Promise((resolve) => setTimeout(resolve, waitTime))
     }
 
     logger.info(`Campaign completed. Successfully sent ${successCount} DMs`)
@@ -777,23 +848,44 @@ export const handler: StepHandler<typeof config> = async (
       },
     })
   } catch (error) {
-    const errorMessage = error instanceof Error
-      ? `${error.name}: ${error.message}`
-      : `Unknown error: ${String(error)}`
+    // Create detailed error message with explicit properties
+    let errorDetails = "Unknown error";
 
-    logger.error('DM campaign failed:', errorMessage)
-
-    if (error instanceof Error && error.stack) {
-      logger.error('Error stack trace:', error.stack)
+    if (error instanceof Error) {
+      errorDetails = `Error name: ${error.name}\nMessage: ${error.message}`;
+      if (error.stack) {
+        errorDetails += `\nStack trace: ${error.stack}`;
+      }
+    } else {
+      errorDetails = String(error);
     }
+
+    // Log verbose error details
+    logger.error('DM campaign failed with details:');
+    logger.error(errorDetails);
+
+    // Also log serialized error
+    logger.error('Raw error object:',
+      typeof error === 'object'
+        ? JSON.stringify(error, Object.getOwnPropertyNames(error))
+        : String(error)
+    );
 
     await emit({
       topic: 'dm.status.updated',
       data: {
         location: input.location,
-        error: errorMessage,
+        error: typeof error === 'object' ? (error.message || JSON.stringify(error)) : String(error),
         count: 0,
       },
-    })
+    });
+  } finally {
+    // Always try to close the browser, even if there was an error
+    try {
+      await instagram.close()
+      logger.info('Browser closed successfully')
+    } catch (closeError) {
+      logger.error('Error closing browser:', closeError)
+    }
   }
 }
