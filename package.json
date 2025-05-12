@@ -1,0 +1,35 @@
+{
+  "name": "restaurant-automate-dms",
+  "description": "Restaurant automate dms",
+  "scripts": {
+    "dev": "motia dev",
+    "dev:debug": "motia dev --debug",
+    "generate:config": "motia get-config --output ./"
+  },
+  "keywords": [
+    "motia"
+  ],
+  "dependencies": {
+    "@motiadev/core": "0.1.0-beta.26",
+    "@motiadev/workbench": "0.1.0-beta.26",
+    "@supabase/supabase-js": "^2.41.0",
+    "@types/uuid": "^9.0.8",
+    "axios": "^1.8.2",
+    "motia": "0.1.0-beta.26",
+    "@playwright/test": "^1.52.0",
+    "dotenv": "^16.5.0",
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.52.0",
+    "puppeteer-core": "^24.8.2",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "serpapi": "^2.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}
